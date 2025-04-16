@@ -41,6 +41,8 @@ The project is organized as follows:
      |----vgg19.py
      |---- ops.py
  /test
+ LICENSE
+ README.md
 ```
 
 ## Directories Description
