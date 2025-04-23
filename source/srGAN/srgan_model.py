@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from ops import *
+from utils import *
 
 
 class Generator(nn.Module):
