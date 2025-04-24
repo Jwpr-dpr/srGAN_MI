@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from torchvision.transforms.functional import resize
 
 class _conv(nn.Conv2d):
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias):
@@ -95,3 +95,16 @@ class discrim_block(nn.Module):
         out = self.body(x)
         return out
 
+def downsample(img_tensor, scale_factor=4, mode='bicubic'):
+    """
+    Downsamples a high-resolution image back to low-resolution using interpolation.
+    """
+    h, w = img_tensor.shape[-2:]
+    new_h, new_w = h // scale_factor, w // scale_factor
+    return resize(img_tensor, [new_h, new_w], interpolation=mode)
+
+def denormalize(tensor, mean=0.5, std=0.5):
+    return tensor * std + mean
+
+def normalize(tensor, mean=0.5, std=0.5):
+    return (tensor - mean) / std
