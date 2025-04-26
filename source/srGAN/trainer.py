@@ -14,6 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 from torch.backends import cudnn
 import torch.nn.functional as F
+from dataset import * 
 
 date = datetime.today().strftime('%d-%m-%Y')
 save_model_path = f"../models/SRGAN-{date}.pth"
@@ -26,77 +27,154 @@ perceptual_loss = vgg19()
 generator = Generator()
 discriminator = Discriminator()
 
-def training_step( generator:nn.Module, discriminator:nn.Module, gen_optimizer:optim, disc_optimizer:optim, real_hr, lr_input,
-                bce_loss:nn, perceptual_loss:nn, adv_weight=1e-3, content_weight=1.0, device=device):
-    
-    generator.train()
-    discriminator.train()
 
-    real_hr = real_hr.to(device)
-    lr_input = lr_input.to(device)
-    batch_size = real_hr.size(0)
+def train(
+    GT_path, LR_path, val_GT_path, val_LR_path, in_memory,
+    batch_size, num_workers, patch_size, scale, res_num,
+    pre_train_epoch, fine_train_epoch, fine_tuning, generator_path,
+    feat_layer, vgg_rescale_coeff, adv_coeff, tv_loss_coeff
+):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    real_labels = torch.ones((batch_size, 1), device=device)
-    fake_labels = torch.zeros((batch_size, 1), device=device)
+    transform = transforms.Compose([CropPatch(scale, patch_size), Augmentation()])
+    train_set = SuperResolutionDataset(GT_path, LR_path, in_memory, transform)
+    val_set = SuperResolutionDataset(val_GT_path, val_LR_path, in_memory, transform)
 
-    # Train Discriminator
-    disc_optimizer.zero_grad()
-    with torch.no_grad():
-        fake_hr = generator(lr_input)
-    pred_real = discriminator(real_hr)
-    pred_fake = discriminator(fake_hr)
-    d_loss_real = bce_loss(pred_real, real_labels)
-    d_loss_fake = bce_loss(pred_fake, fake_labels)
-    d_loss = d_loss_real + d_loss_fake
-    d_loss.backward()
-    disc_optimizer.step()
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
-    # Train Generator
-    gen_optimizer.zero_grad()
-    fake_hr = generator(lr_input)
-    pred_fake = discriminator(fake_hr)
-    adversarial_loss = bce_loss(pred_fake, real_labels)
-    content_loss = perceptual_loss(fake_hr, real_hr)
-    g_loss = content_weight * content_loss + adv_weight * adversarial_loss
-    g_loss.backward()
-    gen_optimizer.step()
-
-    return {
-        'g_loss': g_loss.item(),
-        'd_loss': d_loss.item(),
-        'adv_loss': adversarial_loss.item(),
-        'content_loss': content_loss.item()
-    }
-
-def evaluate_step( generator, discriminator, gen_optimizer, disc_optimizer, real_hr, lr_input,
-                bce_loss, perceptual_loss, adv_weight=1e-3, content_weight=1.0, device=device):
-    
-    def cycle_consistency_loss(sr_model, lr_img, downsample_fn, scale_factor=4):
-        """
-        Computes the L1 cycle-consistency loss between the original LR image
-        and the one obtained after SR -> Downsampling.
-        """
-        with torch.no_grad():
-            sr_img = sr_model(lr_img)                    # LR -> HR
-            rec_img = downsample_fn(sr_img, scale_factor) # HR -> LR (reverse)
-        
-        loss = F.l1_loss(rec_img, lr_img)
-        return loss.item()
-    
-    return
-
-
-def train(pathToData:str, pathToTrainFile:str, pathToTestFile:str, pathToValFile:str,
-          bathSize:int, training:str,learningRate:float, epochs:int, generator_path:str,
-          discriminator_path:str):
-    
-    if training == 'tuning':
+    generator = Generator(3, 64, 3, res_num, scale).to(device)
+    if fine_tuning:
         generator.load_state_dict(torch.load(generator_path))
-    
-    generator.to(device)
     generator.train()
-    return
 
-def test(pathToData:str, pathToTrainFile:str, pathToTestFile:str, pathToValFile:str,
-          bathSize:int,learningRate:float, epochs:int, generator_path:str, discriminator_path:str):
-    return
+    l2_loss = nn.MSELoss()
+    g_optim = optim.Adam(generator.parameters(), lr=1e-4)
+
+    for epoch in range(pre_train_epoch):
+        epoch_train(generator, train_loader, g_optim, l2_loss, device, phase='pre')
+        if epoch % 2 == 0:
+            print(f"[Pre-train Epoch {epoch}] done")
+        if epoch % 800 == 0:
+            torch.save(generator.state_dict(), f'./model/pre_trained_model_{epoch:03d}.pt')
+
+    discriminator = Discriminator(patch_size * scale).to(device)
+    discriminator.train()
+    d_optim = optim.Adam(discriminator.parameters(), lr=1e-4)
+    scheduler = optim.lr_scheduler.StepLR(g_optim, step_size=2000, gamma=0.1)
+
+    vgg_net = vgg19().to(device).eval()
+    VGG_loss = perceptual_loss(vgg_net)
+    cross_ent = nn.BCELoss()
+    tv_loss = TVLoss()
+
+    for epoch in range(fine_train_epoch):
+        scheduler.step()
+        args = type('', (), {})()
+        args.feat_layer = feat_layer
+        args.vgg_rescale_coeff = vgg_rescale_coeff
+        args.adv_coeff = adv_coeff
+        args.tv_loss_coeff = tv_loss_coeff
+        epoch_train(generator, train_loader, g_optim, l2_loss, device, discriminator, d_optim, VGG_loss, cross_ent, tv_loss, args, phase='fine')
+
+        val_loss, val_psnr = evaluate_epoch(generator, val_loader, device, l2_loss, scale)
+        print(f"[Fine-tune Epoch {epoch}] Val Loss: {val_loss:.4f}, Val PSNR: {val_psnr:.2f}")
+
+        if epoch % 500 == 0:
+            torch.save(generator.state_dict(), f'./model/SRGAN_gene_{epoch:03d}.pt')
+            torch.save(discriminator.state_dict(), f'./model/SRGAN_discrim_{epoch:03d}.pt')
+
+def epoch_train(generator, loader, g_optim, l2_loss, device, discriminator=None, d_optim=None, VGG_loss=None, cross_ent=None, tv_loss=None, args=None, phase='pre'):
+    generator.train()
+    for data in loader:
+        gt = data['GT'].to(device)
+        lr = data['LR'].to(device)
+        if phase == 'pre':
+            output, _ = generator(lr)
+            loss = l2_loss(gt, output)
+            g_optim.zero_grad()
+            loss.backward()
+            g_optim.step()
+        else:
+            output, _ = generator(lr)
+            fake_prob = discriminator(output)
+            real_prob = discriminator(gt)
+
+            d_loss_real = cross_ent(real_prob, torch.ones_like(real_prob))
+            d_loss_fake = cross_ent(fake_prob, torch.zeros_like(fake_prob))
+            d_loss = d_loss_real + d_loss_fake
+            d_optim.zero_grad()
+            d_loss.backward()
+            d_optim.step()
+
+            output, _ = generator(lr)
+            fake_prob = discriminator(output)
+            _percep_loss, hr_feat, sr_feat = VGG_loss((gt+1)/2, (output+1)/2, layer=args.feat_layer)
+
+            L2 = l2_loss(output, gt)
+            percep = args.vgg_rescale_coeff * _percep_loss
+            adv = args.adv_coeff * cross_ent(fake_prob, torch.ones_like(fake_prob))
+            tv = args.tv_loss_coeff * tv_loss(args.vgg_rescale_coeff * (hr_feat - sr_feat) ** 2)
+
+            g_loss = L2 + percep + adv + tv
+            g_optim.zero_grad()
+            g_loss.backward()
+            g_optim.step()
+
+def evaluate_epoch(generator, loader, device, l2_loss, scale):
+    generator.eval()
+    total_loss = 0
+    psnr_list = []
+    with torch.no_grad():
+        for data in loader:
+            gt = data['GT'].to(device)
+            lr = data['LR'].to(device)
+            output, _ = generator(lr)
+            loss = l2_loss(gt, output)
+            total_loss += loss.item()
+
+            output = (output[0].cpu().numpy() + 1) / 2
+            gt = (gt[0].cpu().numpy() + 1) / 2
+            output = np.clip(output, 0, 1).transpose(1, 2, 0)
+            gt = gt.transpose(1, 2, 0)
+            y_output = rgb2ycbcr(output)[scale:-scale, scale:-scale, :1]
+            y_gt = rgb2ycbcr(gt)[scale:-scale, scale:-scale, :1]
+            psnr = compare_psnr(y_output / 255.0, y_gt / 255.0, data_range=1.0)
+            psnr_list.append(psnr)
+
+    avg_loss = total_loss / len(loader)
+    avg_psnr = np.mean(psnr_list)
+    return avg_loss, avg_psnr
+
+def test(GT_path, LR_path, res_num, generator_path, scale, num_workers):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dataset = SuperResolutionDataset(GT_path, LR_path, False, None)
+    loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=num_workers)
+
+    generator = Generator(3, 64, 3, res_num).to(device)
+    generator.load_state_dict(torch.load(generator_path))
+    generator.eval()
+
+    f = open('./result.txt', 'w')
+    psnr_list = []
+
+    with torch.no_grad():
+        for i, data in enumerate(loader):
+            gt = data['GT'].to(device)
+            lr = data['LR'].to(device)
+            output, _ = generator(lr)
+
+            output = (output[0].cpu().numpy() + 1) / 2
+            gt = (gt[0].cpu().numpy() + 1) / 2
+            output = np.clip(output, 0, 1).transpose(1, 2, 0)
+            gt = gt.transpose(1, 2, 0)
+            y_output = rgb2ycbcr(output)[scale:-scale, scale:-scale, :1]
+            y_gt = rgb2ycbcr(gt)[scale:-scale, scale:-scale, :1]
+
+            psnr = compare_psnr(y_output / 255.0, y_gt / 255.0, data_range=1.0)
+            psnr_list.append(psnr)
+            f.write(f'psnr : {psnr:.4f}\n')
+            Image.fromarray((output * 255.0).astype(np.uint8)).save(f'./result/res_{i:04d}.png')
+
+        f.write(f'avg psnr : {np.mean(psnr_list):.4f}')
+        f.close()
