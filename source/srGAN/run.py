@@ -6,10 +6,10 @@ def main(pathToData:str, pathToTrainFile:str, pathToTestFile:str, pathToValFile:
           discriminator_path):
 
     if process == 'training' or 'tunning':
-        train(pathToData, pathToTrainFile, pathToTestFile, pathToValFile, bathSize,
+        SR_Trainer.train(pathToData, pathToTrainFile, pathToTestFile, pathToValFile, bathSize,
                process,learningRate, epochs, generator_path)
     elif process == 'test':
-        test(pathToData, pathToTestFile, pathToValFile, bathSize, learningRate, generator_path, discriminator_path)
+        SR_Trainer.test(pathToData, pathToTestFile, pathToValFile, bathSize, learningRate, generator_path, discriminator_path)
     else:
         print("Please select a valid process")
         sys.exit(1)

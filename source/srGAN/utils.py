@@ -108,3 +108,15 @@ def denormalize(tensor, mean=0.5, std=0.5):
 
 def normalize(tensor, mean=0.5, std=0.5):
     return (tensor - mean) / std
+
+def cycle_consistency_loss(sr_model, lr_img, downsample_fn, scale_factor=4):
+    """
+    Computes the L1 cycle-consistency loss between the original LR image
+    and the one obtained after SR -> Downsampling.
+    """
+    with torch.no_grad():
+        sr_img = sr_model(lr_img)                    # LR -> HR
+        rec_img = downsample_fn(sr_img, scale_factor) # HR -> LR (reverse)
+    
+    loss = F.l1_loss(rec_img, lr_img)
+    return loss.item()
