@@ -8,6 +8,7 @@ from srgan_model import Generator, Discriminator
 from vgg19 import vgg19
 import numpy as np
 from PIL import Image
+from skimage.metrics import structural_similarity as compare_ssim
 from skimage.color import rgb2ycbcr
 from skimage.measure import compare_psnr
 from torch.utils.tensorboard import SummaryWriter
@@ -133,7 +134,7 @@ class SR_Trainer:
             g_optim.step()
 
 
-    def evaluate_epoch(generator, loader, device, l2_loss, scale, VGG_loss, cross_ent, discriminator, args,tv_loss):
+    def evaluate_epoch(generator, loader, device, l2_loss, scale, VGG_loss, cross_ent, discriminator, args, tv_loss):
         generator.eval()
         discriminator.eval()
 
@@ -142,6 +143,7 @@ class SR_Trainer:
         total_adv_loss = 0
         total_tv_loss = 0
         psnr_list = []
+        ssim_list = []  # <--- NEW
 
         with torch.no_grad():
             for data in loader:
@@ -165,7 +167,7 @@ class SR_Trainer:
                 total_adv_loss += adv.item()
                 total_tv_loss += tv.item()
 
-                # PSNR
+                # PSNR & SSIM
                 output = (output[0].cpu().numpy() + 1) / 2
                 gt = (gt[0].cpu().numpy() + 1) / 2
                 output = np.clip(output, 0, 1).transpose(1, 2, 0)
@@ -175,14 +177,18 @@ class SR_Trainer:
                 y_gt = rgb2ycbcr(gt)[scale:-scale, scale:-scale, :1]
 
                 psnr = compare_psnr(y_output / 255.0, y_gt / 255.0, data_range=1.0)
+                ssim = compare_ssim(y_output, y_gt, data_range=255.0, channel_axis=2)  # <--- SSIM computation
+
                 psnr_list.append(psnr)
+                ssim_list.append(ssim)  # <--- store SSIM
 
         metrics = {
-        'avg_loss' : total_loss / len(loader),
-        'avg_percep_loss' : total_percep_loss / len(loader),
-        'avg_adv_loss' : total_adv_loss / len(loader),
-        'avg_tv_loss' : total_tv_loss / len(loader),
-        'avg_psnr' : np.mean(psnr_list)
+            'avg_loss' : total_loss / len(loader),
+            'avg_percep_loss' : total_percep_loss / len(loader),
+            'avg_adv_loss' : total_adv_loss / len(loader),
+            'avg_tv_loss' : total_tv_loss / len(loader),
+            'avg_psnr' : np.mean(psnr_list),
+            'avg_ssim' : np.mean(ssim_list)  # <--- NEW
         }
         return metrics
 
