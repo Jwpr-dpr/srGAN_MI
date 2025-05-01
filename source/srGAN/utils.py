@@ -66,6 +66,63 @@ class BasicBlock(nn.Module):
         out += res
         
         return out
+
+class GradCAM:
+    def __init__(self, model, target_layer):
+        self.model = model
+        self.target_layer = target_layer
+
+        self.gradients = None
+        self.activations = None
+
+        self._register_hooks()
+
+    def _register_hooks(self):
+        def forward_hook(module, input, output):
+            self.activations = output.detach()
+
+        def backward_hook(module, grad_input, grad_output):
+            self.gradients = grad_output[0].detach()
+
+        self.target_layer.register_forward_hook(forward_hook)
+        self.target_layer.register_full_backward_hook(backward_hook)
+
+    def __call__(self, x):
+        # Make sure input is in the form [B, C, H, W]
+        if isinstance(x, torch.Tensor):
+            if x.ndim == 1:  # [784]
+                x = x.view(1, 1, 2048, 2048)
+            elif x.ndim == 2:  # [1, 784]
+                x = x.view(-1, 1, 2048, 2048)
+            elif x.ndim == 3:  # [1, 28, 28]
+                x = x.unsqueeze(0)
+            elif x.ndim == 4:
+                pass  # already [B, C, H, W]
+            else:
+                raise ValueError(f"Unsupported input shape: {x.shape}")
+        else:
+            raise TypeError("Input must be a torch.Tensor")
+
+        x = x.requires_grad_()
+
+        # Forward pass
+        output = self.model(x)
+
+        # Backward pass
+        self.model.zero_grad()
+        output.backward(torch.ones_like(output))
+
+        # Global average pooling of gradients
+        weights = self.gradients.mean(dim=[2, 3], keepdim=True)
+        cam = (weights * self.activations).sum(dim=1, keepdim=True)
+        cam = F.relu(cam)
+
+        # Resize and normalize
+        cam = F.interpolate(cam, size=(2048, 2048), mode='bilinear', align_corners=False)
+        cam = cam.squeeze().cpu().numpy()
+        cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
+
+        return cam
         
 class Upsampler(nn.Module):
     def __init__(self, channel, kernel_size, scale, act = nn.ReLU(inplace = True)):

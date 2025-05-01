@@ -29,23 +29,25 @@ class SR_Trainer:
         self.bce_loss = nn.BCELoss()
         self.pixel_loss = nn.MSELoss()
         self.perceptual_loss = vgg19()
-        self.generator = Generator(3, 64, 3).to(self.device)
+        self.generator = Generator().to(self.device)
         self.discriminator = Discriminator(self.patch_size * self.scale).to(self.device)
         self.date = datetime.today().strftime('%d-%m-%Y')
-        self.save_model_path = f"../models/SRGAN-{self.date}.pth"
-        self.writer = SummaryWriter(f"../logs/runs/SRGAN-training-{self.date}")
+        self.save_model_path = f"../../models/SRGAN-{self.date}.pth"
+        self.writer = SummaryWriter(f"../../logs/runs/SRGAN-training-{self.date}")
         
         pass
     
-    cudnn.benchmark = True
-
+    
     def train(self, GT_path: str, LR_path: str, val_GT_path: str, val_LR_path: str, 
             batch_size: int, epochs: int, process: str, generator_path: str,
             feat_layer, vgg_rescale_coeff, adv_coeff, tv_loss_coeff,
             scale: int = 4, num_workers: int = 3):
 
-        init_val_loss = 1e10
+        cudnn.benchmark = True
+
+        init_val_loss = 100
         init_val_psnr = 0
+        init_val_ssim = 0
 
         transform = transforms.Compose([CropPatch(scale, self.patch_size), Augmentation()])
         
@@ -81,14 +83,22 @@ class SR_Trainer:
             metrics = self.evaluate_epoch(self.generator, val_loader, self.device, l2_loss, scale)
             scheduler.step()
             
-            tqdm.write(f"[Training epoch: {epoch}] Val Loss: {metrics['val_loss']:.4f}, Val PSNR: {metrics['val_psnr']:.2f}")
-            tqdm.set_postfix(val_loss=metrics['val_loss'], val_psnr=['val_psnr'])
-
-            if (epoch % 500 == 0) or (metrics['val_loss'] < init_val_loss and metrics['val_psnr'] > init_val_psnr):
+            tqdm.write(f"[Training epoch: {epoch}] Best Val Loss: {init_val_loss:.4f},Best Val PSNR: {init_val_psnr:.2f}")
+            tqdm.set_postfix(val_loss=init_val_loss, val_psnr=init_val_psnr, val_ssim = init_val_ssim)
+            init_val_loss = metrics['val_loss']
+            if (epoch % 500 == 0) or (metrics['val_ssim'] > init_val_ssim and metrics['val_psnr'] > init_val_psnr):
                 torch.save(self.generator.state_dict(), f'./model/SRGAN_gene_{epoch:03d}.pt')
                 torch.save(self.discriminator.state_dict(), f'./model/SRGAN_discrim_{epoch:03d}.pt')
                 init_val_psnr = metrics['val_psnr']
                 init_val_loss = metrics['val_loss']
+                init_val_ssim = metrics['val_ssim']
+            
+            self.writer.add_scalar('Training Loss', metrics['val_loss'], epoch)
+            self.writer.add_scalar('Perceptual Loss', metrics['val_percep_loss'], epoch)
+            self.writer.add_scalar('Total Variation Loss', metrics['val_tv_loss'], epoch)
+            self.writer.add_scalar('Adversarial Loss', metrics['val_adv_loss'], epoch)
+            self.writer.add_scalar('PSNR', metrics['val_psnr'], epoch)
+            self.writer.add_scalar('SSIM', metrics['val_ssim'], epoch)
 
     
     def epoch_train(
@@ -143,7 +153,7 @@ class SR_Trainer:
         total_adv_loss = 0
         total_tv_loss = 0
         psnr_list = []
-        ssim_list = []  # <--- NEW
+        ssim_list = []  
 
         with torch.no_grad():
             for data in loader:
@@ -177,18 +187,18 @@ class SR_Trainer:
                 y_gt = rgb2ycbcr(gt)[scale:-scale, scale:-scale, :1]
 
                 psnr = compare_psnr(y_output / 255.0, y_gt / 255.0, data_range=1.0)
-                ssim = compare_ssim(y_output, y_gt, data_range=255.0, channel_axis=2)  # <--- SSIM computation
+                ssim = compare_ssim(y_output, y_gt, data_range=255.0, channel_axis=2)  
 
                 psnr_list.append(psnr)
                 ssim_list.append(ssim)  # <--- store SSIM
 
         metrics = {
-            'avg_loss' : total_loss / len(loader),
-            'avg_percep_loss' : total_percep_loss / len(loader),
-            'avg_adv_loss' : total_adv_loss / len(loader),
-            'avg_tv_loss' : total_tv_loss / len(loader),
-            'avg_psnr' : np.mean(psnr_list),
-            'avg_ssim' : np.mean(ssim_list)  # <--- NEW
+            'val_loss' : total_loss / len(loader),
+            'val_percep_loss' : total_percep_loss / len(loader),
+            'val_adv_loss' : total_adv_loss / len(loader),
+            'val_tv_loss' : total_tv_loss / len(loader),
+            'val_psnr' : np.mean(psnr_list),
+            'val_ssim' : np.mean(ssim_list)  
         }
         return metrics
 
